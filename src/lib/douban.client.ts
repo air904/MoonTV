@@ -4,6 +4,7 @@ interface DoubanCategoriesParams {
   kind: 'tv' | 'movie';
   category: string;
   type: string;
+  genre?: string; // 新增：电影类型（动作、喜剧、爱情等）
   pageLimit?: number;
   pageStart?: number;
 }
@@ -21,6 +22,16 @@ interface DoubanCategoryApiResponse {
     rating: {
       value: number;
     };
+  }>;
+}
+
+interface DoubanSearchSubjectsResponse {
+  subjects: Array<{
+    id: string;
+    title: string;
+    cover: string;
+    rate: string;
+    url: string;
   }>;
 }
 
@@ -65,7 +76,6 @@ async function fetchWithTimeout(
  */
 export function getDoubanProxyUrl(): string | null {
   if (typeof window === 'undefined') return null;
-
   const doubanProxyUrl = localStorage.getItem('doubanProxyUrl');
   return doubanProxyUrl && doubanProxyUrl.trim() ? doubanProxyUrl.trim() : null;
 }
@@ -83,15 +93,18 @@ export function shouldUseDoubanClient(): boolean {
 export async function fetchDoubanCategories(
   params: DoubanCategoriesParams
 ): Promise<DoubanResult> {
-  const { kind, category, type, pageLimit = 20, pageStart = 0 } = params;
+  const {
+    kind,
+    category,
+    type,
+    genre = '',
+    pageLimit = 20,
+    pageStart = 0,
+  } = params;
 
   // 验证参数
   if (!['tv', 'movie'].includes(kind)) {
     throw new Error('kind 参数必须是 tv 或 movie');
-  }
-
-  if (!category || !type) {
-    throw new Error('category 和 type 参数不能为空');
   }
 
   if (pageLimit < 1 || pageLimit > 100) {
@@ -102,15 +115,39 @@ export async function fetchDoubanCategories(
     throw new Error('pageStart 不能小于 0');
   }
 
-  const target = `https://m.douban.com/rexxar/api/v2/subject/recent_hot/${kind}?start=${pageStart}&limit=${pageLimit}&category=${category}&type=${type}`;
-
   try {
-    const response = await fetchWithTimeout(target);
+    // 当指定了具体类型（非"全部"）时，使用 search_subjects API
+    if (genre && genre !== '全部') {
+      const target = `https://movie.douban.com/j/search_subjects?type=${kind}&tag=${encodeURIComponent(genre)}&sort=recommend&page_limit=${pageLimit}&page_start=${pageStart}`;
 
+      const response = await fetchWithTimeout(target);
+      if (!response.ok) {
+        throw new Error(`HTTP error! Status: ${response.status}`);
+      }
+      const data: DoubanSearchSubjectsResponse = await response.json();
+
+      const list: DoubanItem[] = (data.subjects || []).map((item) => ({
+        id: item.id,
+        title: item.title,
+        poster: item.cover || '',
+        rate: item.rate || '',
+        year: '',
+      }));
+
+      return { code: 200, message: '获取成功', list };
+    }
+
+    // 原有的 recent_hot 逻辑
+    if (!category || !type) {
+      throw new Error('category 和 type 参数不能为空');
+    }
+
+    const target = `https://m.douban.com/rexxar/api/v2/subject/recent_hot/${kind}?start=${pageStart}&limit=${pageLimit}&category=${category}&type=${type}`;
+
+    const response = await fetchWithTimeout(target);
     if (!response.ok) {
       throw new Error(`HTTP error! Status: ${response.status}`);
     }
-
     const doubanData: DoubanCategoryApiResponse = await response.json();
 
     // 转换数据格式
@@ -143,15 +180,32 @@ export async function getDoubanCategories(
     return fetchDoubanCategories(params);
   } else {
     // 使用服务端 API（当没有设置代理 URL 时）
-    const { kind, category, type, pageLimit = 20, pageStart = 0 } = params;
-    const response = await fetch(
-      `/api/douban/categories?kind=${kind}&category=${category}&type=${type}&limit=${pageLimit}&start=${pageStart}`
-    );
+    const {
+      kind,
+      category,
+      type,
+      genre = '',
+      pageLimit = 20,
+      pageStart = 0,
+    } = params;
 
+    const queryParams = new URLSearchParams({
+      kind,
+      category,
+      type,
+      limit: pageLimit.toString(),
+      start: pageStart.toString(),
+    });
+
+    // 只在有具体类型时传递 genre 参数
+    if (genre && genre !== '全部') {
+      queryParams.set('genre', genre);
+    }
+
+    const response = await fetch(`/api/douban/categories?${queryParams}`);
     if (!response.ok) {
       throw new Error('获取豆瓣分类数据失败');
     }
-
     return response.json();
   }
 }
