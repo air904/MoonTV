@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-
 import { getCacheTime } from '@/lib/config';
 import { DoubanItem, DoubanResult } from '@/lib/types';
 
@@ -19,9 +18,18 @@ interface DoubanCategoryApiResponse {
   }>;
 }
 
-async function fetchDoubanData(
-  url: string
-): Promise<DoubanCategoryApiResponse> {
+interface DoubanSearchSubjectsResponse {
+  subjects: Array<{
+    id: string;
+    title: string;
+    cover: string;
+    rate: string;
+    url: string;
+  }>;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchDoubanData(url: string): Promise<any> {
   // 添加超时控制
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
@@ -39,14 +47,12 @@ async function fetchDoubanData(
   };
 
   try {
-    // 尝试直接访问豆瓣API
     const response = await fetch(url, fetchOptions);
     clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(`HTTP error! Status: ${response.status}`);
     }
-
     return await response.json();
   } catch (error) {
     clearTimeout(timeoutId);
@@ -63,17 +69,11 @@ export async function GET(request: Request) {
   const kind = searchParams.get('kind') || 'movie';
   const category = searchParams.get('category');
   const type = searchParams.get('type');
+  const genre = searchParams.get('genre') || ''; // 新增：电影类型/风格
   const pageLimit = parseInt(searchParams.get('limit') || '20');
   const pageStart = parseInt(searchParams.get('start') || '0');
 
-  // 验证参数
-  if (!kind || !category || !type) {
-    return NextResponse.json(
-      { error: '缺少必要参数: kind 或 category 或 type' },
-      { status: 400 }
-    );
-  }
-
+  // 验证通用参数
   if (!['tv', 'movie'].includes(kind)) {
     return NextResponse.json(
       { error: 'kind 参数必须是 tv 或 movie' },
@@ -95,28 +95,51 @@ export async function GET(request: Request) {
     );
   }
 
-  const target = `https://m.douban.com/rexxar/api/v2/subject/recent_hot/${kind}?start=${pageStart}&limit=${pageLimit}&category=${category}&type=${type}`;
-
   try {
-    // 调用豆瓣 API
-    const doubanData = await fetchDoubanData(target);
+    let list: DoubanItem[];
+    const cacheTime = await getCacheTime();
 
-    // 转换数据格式
-    const list: DoubanItem[] = doubanData.items.map((item) => ({
-      id: item.id,
-      title: item.title,
-      poster: item.pic?.normal || item.pic?.large || '',
-      rate: item.rating?.value ? item.rating.value.toFixed(1) : '',
-      year: item.card_subtitle?.match(/(\d{4})/)?.[1] || '',
-    }));
+    // 当指定了具体类型（非"全部"）时，使用 search_subjects API 进行类型筛选
+    if (genre && genre !== '全部') {
+      const target = `https://movie.douban.com/j/search_subjects?type=${kind}&tag=${encodeURIComponent(genre)}&sort=recommend&page_limit=${pageLimit}&page_start=${pageStart}`;
+
+      const data: DoubanSearchSubjectsResponse = await fetchDoubanData(target);
+      list = (data.subjects || []).map((item) => ({
+        id: item.id,
+        title: item.title,
+        poster: item.cover || '',
+        rate: item.rate || '',
+        year: '',
+      }));
+    } else {
+      // 使用原有的 recent_hot API
+      if (!category || !type) {
+        return NextResponse.json(
+          { error: '缺少必要参数: kind 或 category 或 type' },
+          { status: 400 }
+        );
+      }
+
+      const target = `https://m.douban.com/rexxar/api/v2/subject/recent_hot/${kind}?start=${pageStart}&limit=${pageLimit}&category=${category}&type=${type}`;
+
+      const doubanData: DoubanCategoryApiResponse =
+        await fetchDoubanData(target);
+
+      list = doubanData.items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        poster: item.pic?.normal || item.pic?.large || '',
+        rate: item.rating?.value ? item.rating.value.toFixed(1) : '',
+        year: item.card_subtitle?.match(/(\d{4})/)?.[1] || '',
+      }));
+    }
 
     const response: DoubanResult = {
       code: 200,
       message: '获取成功',
-      list: list,
+      list,
     };
 
-    const cacheTime = await getCacheTime();
     return NextResponse.json(response, {
       headers: {
         'Cache-Control': `public, max-age=${cacheTime}`,
